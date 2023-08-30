@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
 import org.apache.commons.logging.Log;
@@ -153,10 +154,21 @@ public class JdbcIndexedSessionRepository implements
 
 	private static final String SPRING_SECURITY_CONTEXT = "SPRING_SECURITY_CONTEXT";
 
-	private static final String CREATE_SESSION_QUERY = """
-			INSERT INTO %TABLE_NAME% (PRIMARY_ID, SESSION_ID, CREATION_TIME, LAST_ACCESS_TIME, MAX_INACTIVE_INTERVAL, EXPIRY_TIME, PRINCIPAL_NAME)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-			""";
+	private static final QueryAndParams<JdbcSession> CREATE_SESSION_QUERY = new QueryAndParams<>(
+			"""
+					INSERT INTO %TABLE_NAME% (PRIMARY_ID, SESSION_ID, CREATION_TIME, LAST_ACCESS_TIME, MAX_INACTIVE_INTERVAL, EXPIRY_TIME, PRINCIPAL_NAME)
+					VALUES (?, ?, ?, ?, ?, ?, ?)
+					""",
+			(ps, session) -> {
+				Map<String, String> indexes = session.getSessionRepository().indexResolver.resolveIndexesFor(session);
+				ps.setString(1, session.primaryKey);
+				ps.setString(2, session.getId());
+				ps.setLong(3, session.getCreationTime().toEpochMilli());
+				ps.setLong(4, session.getLastAccessedTime().toEpochMilli());
+				ps.setInt(5, (int) session.getMaxInactiveInterval().getSeconds());
+				ps.setLong(6, session.getExpiryTime().toEpochMilli());
+				ps.setString(7, indexes.get(PRINCIPAL_NAME_INDEX_NAME));
+			});
 
 	private static final String CREATE_SESSION_ATTRIBUTE_QUERY = """
 			INSERT INTO %TABLE_NAME%_ATTRIBUTES (SESSION_PRIMARY_ID, ATTRIBUTE_NAME, ATTRIBUTE_BYTES)
@@ -170,11 +182,19 @@ public class JdbcIndexedSessionRepository implements
 			WHERE S.SESSION_ID = ?
 			""";
 
-	private static final String UPDATE_SESSION_QUERY = """
+	private static final QueryAndParams<JdbcSession> UPDATE_SESSION_QUERY = new QueryAndParams<>("""
 			UPDATE %TABLE_NAME%
 			SET SESSION_ID = ?, LAST_ACCESS_TIME = ?, MAX_INACTIVE_INTERVAL = ?, EXPIRY_TIME = ?, PRINCIPAL_NAME = ?
 			WHERE PRIMARY_ID = ?
-			""";
+			""", (ps, session) -> {
+		Map<String, String> indexes = session.getSessionRepository().indexResolver.resolveIndexesFor(session);
+		ps.setString(1, session.getId());
+		ps.setLong(2, session.getLastAccessedTime().toEpochMilli());
+		ps.setInt(3, (int) session.getMaxInactiveInterval().getSeconds());
+		ps.setLong(4, session.getExpiryTime().toEpochMilli());
+		ps.setString(5, indexes.get(PRINCIPAL_NAME_INDEX_NAME));
+		ps.setString(6, session.primaryKey);
+	});
 
 	private static final String UPDATE_SESSION_ATTRIBUTE_QUERY = """
 			UPDATE %TABLE_NAME%_ATTRIBUTES
@@ -220,13 +240,13 @@ public class JdbcIndexedSessionRepository implements
 	 */
 	private String tableName = DEFAULT_TABLE_NAME;
 
-	private String createSessionQuery;
+	private QueryAndParams<JdbcSession> createSessionQuery;
 
 	private String createSessionAttributeQuery;
 
 	private String getSessionQuery;
 
-	private String updateSessionQuery;
+	private QueryAndParams<JdbcSession> updateSessionQuery;
 
 	private String updateSessionAttributeQuery;
 
@@ -308,7 +328,12 @@ public class JdbcIndexedSessionRepository implements
 	 */
 	public void setCreateSessionQuery(String createSessionQuery) {
 		Assert.hasText(createSessionQuery, "Query must not be empty");
-		this.createSessionQuery = getQuery(createSessionQuery);
+		adaptCreateSessionQuery(currentQuery -> currentQuery.replaceQuery(createSessionQuery));
+	}
+
+	public void adaptCreateSessionQuery(UnaryOperator<QueryAndParams<JdbcSession>> adaptQuery) {
+		Assert.notNull(adaptQuery, "Adapt query function must not be null");
+		this.createSessionQuery = adaptQuery.apply(this.createSessionQuery).withTableName(tableName);
 	}
 
 	/**
@@ -335,7 +360,12 @@ public class JdbcIndexedSessionRepository implements
 	 */
 	public void setUpdateSessionQuery(String updateSessionQuery) {
 		Assert.hasText(updateSessionQuery, "Query must not be empty");
-		this.updateSessionQuery = getQuery(updateSessionQuery);
+		adaptUpdateSessionQuery(currentQuery -> currentQuery.replaceQuery(updateSessionQuery));
+	}
+
+	public void adaptUpdateSessionQuery(UnaryOperator<QueryAndParams<JdbcSession>> adaptQuery) {
+		Assert.notNull(adaptQuery, "Adapt query function must not be null");
+		this.updateSessionQuery = adaptQuery.apply(this.updateSessionQuery).withTableName(tableName);
 	}
 
 	/**
@@ -665,10 +695,10 @@ public class JdbcIndexedSessionRepository implements
 	}
 
 	private void prepareQueries() {
-		this.createSessionQuery = getQuery(CREATE_SESSION_QUERY);
+		this.createSessionQuery = CREATE_SESSION_QUERY.withTableName(tableName);
 		this.createSessionAttributeQuery = getQuery(CREATE_SESSION_ATTRIBUTE_QUERY);
 		this.getSessionQuery = getQuery(GET_SESSION_QUERY);
-		this.updateSessionQuery = getQuery(UPDATE_SESSION_QUERY);
+		this.updateSessionQuery = UPDATE_SESSION_QUERY.withTableName(tableName);
 		this.updateSessionAttributeQuery = getQuery(UPDATE_SESSION_ATTRIBUTE_QUERY);
 		this.deleteSessionAttributeQuery = getQuery(DELETE_SESSION_ATTRIBUTE_QUERY);
 		this.deleteSessionQuery = getQuery(DELETE_SESSION_QUERY);
@@ -888,18 +918,10 @@ public class JdbcIndexedSessionRepository implements
 		private void save() {
 			if (this.isNew) {
 				JdbcIndexedSessionRepository.this.transactionOperations.executeWithoutResult((status) -> {
-					Map<String, String> indexes = JdbcIndexedSessionRepository.this.indexResolver
-							.resolveIndexesFor(JdbcSession.this);
-					JdbcIndexedSessionRepository.this.jdbcOperations
-							.update(JdbcIndexedSessionRepository.this.createSessionQuery, (ps) -> {
-								ps.setString(1, JdbcSession.this.primaryKey);
-								ps.setString(2, getId());
-								ps.setLong(3, getCreationTime().toEpochMilli());
-								ps.setLong(4, getLastAccessedTime().toEpochMilli());
-								ps.setInt(5, (int) getMaxInactiveInterval().getSeconds());
-								ps.setLong(6, getExpiryTime().toEpochMilli());
-								ps.setString(7, indexes.get(PRINCIPAL_NAME_INDEX_NAME));
-							});
+					JdbcIndexedSessionRepository.this.jdbcOperations.update(
+							JdbcIndexedSessionRepository.this.createSessionQuery.query(),
+							JdbcIndexedSessionRepository.this.createSessionQuery
+									.preparedStatementSetterFor(JdbcSession.this));
 					Set<String> attributeNames = getAttributeNames();
 					if (!attributeNames.isEmpty()) {
 						insertSessionAttributes(JdbcSession.this, new ArrayList<>(attributeNames));
@@ -909,17 +931,10 @@ public class JdbcIndexedSessionRepository implements
 			else {
 				JdbcIndexedSessionRepository.this.transactionOperations.executeWithoutResult((status) -> {
 					if (JdbcSession.this.changed) {
-						Map<String, String> indexes = JdbcIndexedSessionRepository.this.indexResolver
-								.resolveIndexesFor(JdbcSession.this);
-						JdbcIndexedSessionRepository.this.jdbcOperations
-								.update(JdbcIndexedSessionRepository.this.updateSessionQuery, (ps) -> {
-									ps.setString(1, getId());
-									ps.setLong(2, getLastAccessedTime().toEpochMilli());
-									ps.setInt(3, (int) getMaxInactiveInterval().getSeconds());
-									ps.setLong(4, getExpiryTime().toEpochMilli());
-									ps.setString(5, indexes.get(PRINCIPAL_NAME_INDEX_NAME));
-									ps.setString(6, JdbcSession.this.primaryKey);
-								});
+						JdbcIndexedSessionRepository.this.jdbcOperations.update(
+								JdbcIndexedSessionRepository.this.updateSessionQuery.query(),
+								JdbcIndexedSessionRepository.this.updateSessionQuery
+										.preparedStatementSetterFor(JdbcSession.this));
 					}
 					List<String> addedAttributeNames = JdbcSession.this.delta.entrySet().stream()
 							.filter((entry) -> entry.getValue() == DeltaValue.ADDED).map(Map.Entry::getKey)
@@ -942,6 +957,10 @@ public class JdbcIndexedSessionRepository implements
 				});
 			}
 			clearChangeFlags();
+		}
+
+		private JdbcIndexedSessionRepository getSessionRepository() {
+			return JdbcIndexedSessionRepository.this;
 		}
 
 	}

@@ -125,6 +125,12 @@ class JdbcIndexedSessionRepositoryTests {
 	}
 
 	@Test
+	void adaptCreateSessionQueryNull() {
+		assertThatIllegalArgumentException().isThrownBy(() -> this.repository.adaptCreateSessionQuery(null))
+				.withMessage("Adapt query function must not be null");
+	}
+
+	@Test
 	void setCreateSessionAttributeQueryNull() {
 		assertThatIllegalArgumentException().isThrownBy(() -> this.repository.setCreateSessionAttributeQuery(null))
 				.withMessage("Query must not be empty");
@@ -152,6 +158,12 @@ class JdbcIndexedSessionRepositoryTests {
 	void setUpdateSessionQueryNull() {
 		assertThatIllegalArgumentException().isThrownBy(() -> this.repository.setUpdateSessionQuery(null))
 				.withMessage("Query must not be empty");
+	}
+
+	@Test
+	void adaptUpdateSessionQueryNull() {
+		assertThatIllegalArgumentException().isThrownBy(() -> this.repository.adaptUpdateSessionQuery(null))
+				.withMessage("Adapt query function must not be null");
 	}
 
 	@Test
